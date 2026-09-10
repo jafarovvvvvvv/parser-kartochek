@@ -66,7 +66,9 @@ def _clean_defect(text: str) -> str:
     text = re.sub(r"[;\s]*\bundefined\b", "", text)
     text = re.sub(r";\s*0\s*;", "; ", text)
     text = re.sub(r"\s*[-–]\s*$", "", text.strip())
-    return re.sub(r"\s{2,}", " ", text).strip(" ;")
+    # Переводы строк внутри описания ("Неисправность: ...\nРемонт: ...") ломают
+    # отступы в списке экземпляров — весь дефект должен быть одной строкой.
+    return re.sub(r"\s+", " ", text).strip(" ;")
 
 
 def _parse_listing(page_html: str, limit: int) -> list[Product]:
