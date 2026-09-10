@@ -4,6 +4,7 @@
 идёт внутри группы, а не по всей плоской выдаче."""
 import json
 import logging
+import re
 
 import httpx
 
@@ -121,6 +122,36 @@ async def group_and_filter(category: str, query: str, criteria: str, products: l
         log.exception("grouping: не удалось сгруппировать через ИИ, показываю без группировки")
         return _fallback(products)
 
+    return _merge_same_model(_build_groups(raw_groups, products))
+
+
+def _model_key(model: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", model.lower())
+
+
+def _merge_same_model(groups: list[ProductGroup]) -> list[ProductGroup]:
+    """ИИ иногда раскладывает одну и ту же модель по двум группам (например,
+    предложения с микрофоном и без из одной линейки). Тогда «дешевле всего»
+    считается внутри каждой половины, и пользователю показывается не самая
+    низкая цена — поймано вживую на Sony MDR-ZX310AP: 18 670 с пометкой
+    «дешевле всего» при 5 990 в соседней карточке."""
+    merged: dict[str, ProductGroup] = {}
+    order: list[str] = []
+    for group in groups:
+        key = _model_key(group.model)
+        if key not in merged:
+            merged[key] = group
+            order.append(key)
+            continue
+        target = merged[key]
+        target.products += group.products
+        target.products.sort(key=lambda p: p.price)
+        if not target.specs:
+            target.specs = group.specs
+    return [merged[key] for key in order]
+
+
+def _build_groups(raw_groups: list, products: list[Product]) -> list[ProductGroup]:
     by_index = {n: p for n, p in enumerate(products, start=1)}
     used: set[int] = set()
     result: list[ProductGroup] = []
