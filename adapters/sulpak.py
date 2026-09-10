@@ -59,6 +59,16 @@ def _digits(text: str) -> int | None:
     return int(cleaned) if cleaned else None
 
 
+def _clean_defect(text: str) -> str:
+    """В описании уценки попадается служебный мусор самого Sulpak: хвост
+    "- undefined" вместо списка комплектации и разделитель ";0;" между частями.
+    Смысла не несёт, а читать мешает."""
+    text = re.sub(r"[;\s]*\bundefined\b", "", text)
+    text = re.sub(r";\s*0\s*;", "; ", text)
+    text = re.sub(r"\s*[-–]\s*$", "", text.strip())
+    return re.sub(r"\s{2,}", " ", text).strip(" ;")
+
+
 def _parse_listing(page_html: str, limit: int) -> list[Product]:
     products = []
     for m in _ITEM_RE.finditer(page_html):
@@ -122,7 +132,7 @@ def _parse_cheaper_units(fragment: str, item: dict, new_price: int | None) -> li
         if not price:
             continue
         defects = {
-            html.unescape(m.group("title")).strip(): html.unescape(m.group("text")).strip()
+            html.unescape(m.group("title")).strip(): _clean_defect(html.unescape(m.group("text")))
             for m in _UNIT_MORE_RE.finditer(chunk)
         }
         address = defects.pop("Адрес", None)

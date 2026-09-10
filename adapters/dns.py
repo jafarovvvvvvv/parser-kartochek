@@ -1,5 +1,6 @@
 import json
 import re
+from urllib.parse import urlparse
 
 from adapters.base import ShopAdapter
 from adapters.playwright_client import stealth_page
@@ -52,6 +53,15 @@ def _parse_rating(attr: str | None) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def _product_path(href: str) -> str:
+    """href в карточке бывает и абсолютным (у блока аналогов) — тогда подстановка
+    в PRODUCT_URL давала склейку вида "dns-shop.kzhttps://dns-shop.kz/..."
+    и нерабочую ссылку в сообщении (поймано вживую)."""
+    if href.startswith("http"):
+        return urlparse(href).path
+    return href
+
+
 def _to_product(card: dict) -> Product | None:
     if not card.get("name") or not card.get("href"):
         return None
@@ -59,15 +69,16 @@ def _to_product(card: dict) -> Product | None:
     if price is None:
         return None
     specs = {label: value for label, value in card.get("specs", []) if label and value}
+    path = _product_path(card["href"])
     return Product(
         shop="dns",
         name=card["name"],
         price=price,
         currency="KZT",
-        url=PRODUCT_URL.format(path=card["href"]),
+        url=PRODUCT_URL.format(path=path),
         rating=_parse_rating(card.get("ratingAttr")),
         specs=specs,
-        external_id=card["href"],
+        external_id=path,
     )
 
 

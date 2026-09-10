@@ -29,6 +29,7 @@ RIVALS = [WildberriesAdapter(), KaspiAdapter(), TechnodomAdapter(), DnsAdapter()
 
 RAW_LIMIT = 12
 PER_SHOP = 3
+PAUSE_BETWEEN_LOOKUPS_SEC = 4
 # Названия в Sulpak длинные и с повторами ("FreeBuds 5i T0014 Isle Blue FreeBuds
 # 5i Isle Blue"), а поиск магазинов на длинных строках отдаёт пустоту — см.
 # README про query_planner. Поэтому в чужие магазины уходит короткий запрос.
@@ -214,6 +215,11 @@ async def scan_once(force: bool = False, chats: list[int] | None = None) -> list
     analogs: dict[str, Product | None] = {}
     for unit in good:
         if unit.code not in analogs:
+            if analogs:
+                # Пауза между поисками: Wildberries на серию запросов подряд
+                # начинает отвечать 429 (ловилось и локально, и на сервере), и
+                # тогда сравнивать становится не с чем.
+                await asyncio.sleep(PAUSE_BETWEEN_LOOKUPS_SEC)
             try:
                 analogs[unit.code] = await find_cheapest_analog(unit)
             except Exception:
