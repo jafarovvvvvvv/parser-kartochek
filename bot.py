@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import db
+import deals
 import tg
 from adapters.dns import DnsAdapter
 from adapters.kaspi import KaspiAdapter
@@ -10,6 +11,7 @@ from adapters.technodom import TechnodomAdapter
 from adapters.wildberries import WildberriesAdapter
 from advice import recommend
 from compare import MAX_GROUPS, format_comparison
+from config import DEALS_MIN_DISCOUNT
 from grouping import group_and_filter
 from models import Product
 from query_planner import plan as plan_query
@@ -52,7 +54,11 @@ HELP_TEXT = (
     "Команды:\n"
     "/track N — начать отслеживать цену N-го товара из последнего поиска\n"
     "/list — список отслеживаемых товаров\n"
-    "/untrack ID — прекратить отслеживание"
+    "/untrack ID — прекратить отслеживание\n"
+    f"/deals on — присылать уценку Sulpak со скидкой от {DEALS_MIN_DISCOUNT}% "
+    "(с дефектами экземпляра и ценой такого же нового в других магазинах)\n"
+    "/deals off — перестать\n"
+    "/deals scan — проверить уценку прямо сейчас"
 )
 
 
@@ -118,6 +124,10 @@ async def handle_text(chat_id: int, text: str) -> None:
         await tg.send_message(chat_id, "Готово." if ok else "Не нашёл такой ID у тебя в списке.")
         return
 
+    if text.startswith("/deals"):
+        await handle_deals(chat_id, text)
+        return
+
     if text.startswith("/"):
         await tg.send_message(chat_id, "Не знаю такую команду.\n\n" + HELP_TEXT)
         return
@@ -160,6 +170,41 @@ async def handle_text(chat_id: int, text: str) -> None:
     verdict = await recommend(full_text, criteria, groups[:MAX_GROUPS])
     if verdict:
         await tg.send_message(chat_id, verdict)
+
+
+async def handle_deals(chat_id: int, text: str) -> None:
+    arg = text[len("/deals"):].strip().lower()
+    if arg == "on":
+        db.add_deals_subscriber(chat_id)
+        await tg.send_message(
+            chat_id,
+            f"Буду присылать уценку Sulpak со скидкой от {DEALS_MIN_DISCOUNT}% — "
+            "с дефектами конкретного экземпляра и ценой такого же нового в других "
+            "магазинах. Обход раздела уценки идёт по расписанию.",
+        )
+        return
+    if arg == "off":
+        removed = db.remove_deals_subscriber(chat_id)
+        await tg.send_message(chat_id, "Больше не присылаю." if removed else "Ты и так не подписан.")
+        return
+    if arg == "scan":
+        await tg.send_message(chat_id, "Смотрю уценку Sulpak, это займёт пару минут…")
+        # force=True — показать текущие находки целиком, даже если о них уже
+        # сообщали: это ручная проверка «что там сейчас», а не алерт.
+        found = await deals.scan_once(force=True, chats=[chat_id])
+        if not found:
+            await tg.send_message(
+                chat_id, f"Сейчас нет уценки со скидкой от {DEALS_MIN_DISCOUNT}%."
+            )
+        return
+
+    subscribed = chat_id in db.list_deals_subscribers()
+    await tg.send_message(
+        chat_id,
+        ("Уценка Sulpak: подписка включена." if subscribed else "Уценка Sulpak: подписки нет.")
+        + f"\nПорог скидки — от {DEALS_MIN_DISCOUNT}%."
+        + "\n\n/deals on — включить\n/deals off — выключить\n/deals scan — проверить сейчас",
+    )
 
 
 async def handle_voice(chat_id: int, file_id: str) -> None:

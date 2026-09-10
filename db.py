@@ -30,6 +30,24 @@ CREATE TABLE IF NOT EXISTS price_history (
     price INTEGER NOT NULL,
     checked_at INTEGER NOT NULL
 );
+
+-- Уценённые экземпляры, о которых уже отправлен алерт. Ключ — документ уценки
+-- Sulpak: он привязан к физическому экземпляру, поэтому два одинаковых товара
+-- с разными дефектами считаются разными находками, а повторный обход того же
+-- экземпляра — нет.
+CREATE TABLE IF NOT EXISTS seen_deals (
+    document TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    price INTEGER NOT NULL,
+    discount INTEGER NOT NULL,
+    notified_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS deals_subscribers (
+    chat_id INTEGER PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
 """
 
 
@@ -98,6 +116,50 @@ def deactivate_tracked_item(item_id: int, chat_id: int) -> bool:
             (item_id, chat_id),
         )
         return cur.rowcount > 0
+
+
+def filter_new_deals(documents: list[str]) -> set[str]:
+    """Из пришедших документов уценки оставляет те, о которых ещё не сообщали."""
+    if not documents:
+        return set()
+    with connect() as conn:
+        placeholders = ",".join("?" * len(documents))
+        known = {
+            row["document"]
+            for row in conn.execute(
+                f"SELECT document FROM seen_deals WHERE document IN ({placeholders})", documents
+            )
+        }
+    return set(documents) - known
+
+
+def mark_deal_notified(document: str, code: str, name: str, price: int, discount: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO seen_deals(document, code, name, price, discount, notified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(document) DO UPDATE SET "
+            "price = excluded.price, discount = excluded.discount, notified_at = excluded.notified_at",
+            (document, code, name, price, discount, int(time.time())),
+        )
+
+
+def add_deals_subscriber(chat_id: int) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO deals_subscribers(chat_id, created_at) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO NOTHING",
+            (chat_id, int(time.time())),
+        )
+
+
+def remove_deals_subscriber(chat_id: int) -> bool:
+    with connect() as conn:
+        return conn.execute("DELETE FROM deals_subscribers WHERE chat_id = ?", (chat_id,)).rowcount > 0
+
+
+def list_deals_subscribers() -> list[int]:
+    with connect() as conn:
+        return [row["chat_id"] for row in conn.execute("SELECT chat_id FROM deals_subscribers")]
 
 
 def record_price(item_id: int, price: int) -> None:

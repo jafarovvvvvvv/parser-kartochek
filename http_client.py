@@ -35,12 +35,15 @@ def looks_blocked(status_code: int, text: str) -> bool:
     return any(marker in lowered for marker in ("captcha", "не робот", "antibot", "access denied"))
 
 
-async def _via_curl(method: str, url: str, headers: dict, data: str | None) -> str:
+async def _via_curl(method: str, url: str, headers: dict, data: str | None,
+                     cookies: dict | None = None) -> str:
     """Резерв для эндпоинтов, блокирующих httpx по TLS-отпечатку (напр. card.wb.ru),
     но пропускающих curl. Не защита от полноценного антибота с капчей."""
     cmd = ["curl", "-s", "-m", str(int(HTTP_TIMEOUT)), "-w", "\n%{http_code}", "-X", method]
     for key, value in headers.items():
         cmd += ["-H", f"{key}: {value}"]
+    if cookies:
+        cmd += ["-b", "; ".join(f"{k}={v}" for k, v in cookies.items())]
     if data is not None:
         cmd += ["--data-raw", data]
     cmd.append(url)
@@ -56,14 +59,15 @@ async def _via_curl(method: str, url: str, headers: dict, data: str | None) -> s
 
 
 async def _request_text(method: str, url: str, *, headers: dict | None, params: dict | None,
-                         data: str | None) -> str:
+                         data: str | None, cookies: dict | None = None) -> str:
     # Некоторые API маркетплейсов (например card.wb.ru) отдают 403 на %2C
     # вместо запятой в query, поэтому кодируем вручную, оставляя запятую как есть.
     if params:
         url = f"{url}?{urlencode(params, safe=',')}"
     headers = headers or random_headers()
     last_exc: Exception | None = None
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True,
+                                  cookies=cookies) as client:
         for attempt in range(HTTP_RETRIES + 1):
             is_last_attempt = attempt == HTTP_RETRIES
             try:
@@ -81,7 +85,7 @@ async def _request_text(method: str, url: str, *, headers: dict | None, params: 
                 if not is_last_attempt:
                     await asyncio.sleep(1.5 * (attempt + 1) + random.uniform(0, 0.5))
                     continue
-                return await _via_curl(method, url, headers, data)
+                return await _via_curl(method, url, headers, data, cookies)
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 last_exc = exc
                 if not is_last_attempt:
@@ -89,17 +93,27 @@ async def _request_text(method: str, url: str, *, headers: dict | None, params: 
     raise last_exc
 
 
-async def get_text(url: str, *, headers: dict | None = None, params: dict | None = None) -> str:
-    return await _request_text("GET", url, headers=headers, params=params, data=None)
+async def get_text(url: str, *, headers: dict | None = None, params: dict | None = None,
+                    cookies: dict | None = None) -> str:
+    return await _request_text("GET", url, headers=headers, params=params, data=None,
+                                cookies=cookies)
 
 
 async def get_json(url: str, *, headers: dict | None = None, params: dict | None = None) -> dict | list:
     return json.loads(await _request_text("GET", url, headers=headers, params=params, data=None))
 
 
+async def post_text(url: str, *, headers: dict | None = None, params: dict | None = None,
+                     data: str | None = None, cookies: dict | None = None) -> str:
+    return await _request_text("POST", url, headers=headers, params=params, data=data,
+                                cookies=cookies)
+
+
 async def post_json(url: str, *, headers: dict | None = None, params: dict | None = None,
-                     data: str | None = None, json_body: dict | None = None) -> dict | list:
+                     data: str | None = None, json_body: dict | None = None,
+                     cookies: dict | None = None) -> dict | list:
     if json_body is not None:
         data = json.dumps(json_body)
         headers = (headers or random_headers()) | {"Content-Type": "application/json"}
-    return json.loads(await _request_text("POST", url, headers=headers, params=params, data=data))
+    return json.loads(await _request_text("POST", url, headers=headers, params=params, data=data,
+                                           cookies=cookies))

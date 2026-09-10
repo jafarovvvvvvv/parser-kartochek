@@ -30,8 +30,15 @@ _EXTRACT_CARDS_JS = """
 """
 
 
+# Цена в карточке DNS идёт отдельной строкой ("66 490\xa0₸"), а перед ней идёт
+# последняя характеристика. \s в числе пускать нельзя: он ловит перевод строки
+# и склеивает "IP54\n66 490" в 5466490 — поймано вживую на выдаче по airpods.
+# Первое совпадение — актуальная цена, следующая строка с ₸ — уже "в рассрочку".
+_PRICE_RE = re.compile(r'(\d[\d   ]*)[   ]*₸')
+
+
 def _parse_price(text: str) -> int | None:
-    m = re.search(r'([\d\s ]{3,})\s*₸', text)
+    m = _PRICE_RE.search(text)
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
@@ -86,20 +93,41 @@ class DnsAdapter(ShopAdapter):
         products = [p for p in (_to_product(c) for c in cards) if p]
         return products[:limit]
 
-    async def fetch_price(self, external_id: str) -> Product | None:
-        # Цена на странице товара доступна сразу в JSON-LD (schema.org/Product),
-        # не нужно ждать ленивую AJAX-подгрузку виджета покупки.
+    async def _load_json_ld(self, external_id: str) -> list[str] | None:
         async with stealth_page() as page:
             await page.goto(PRODUCT_URL.format(path=external_id), wait_until="domcontentloaded", timeout=30000)
             try:
-                raw = await page.eval_on_selector(
-                    'script[type="application/ld+json"]', "el => el.textContent"
+                await page.wait_for_selector(
+                    'script[type="application/ld+json"]', state="attached", timeout=15000
+                )
+                return await page.evaluate(
+                    "() => Array.from(document.querySelectorAll('script[type=\"application/ld+json\"]'))"
+                    ".map(e => e.textContent)"
                 )
             except Exception:
                 return None
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+
+    async def fetch_price(self, external_id: str) -> Product | None:
+        # Цена на странице товара есть в JSON-LD (schema.org/Product) — ждать
+        # ленивую AJAX-подгрузку виджета покупки не нужно. Но сам JSON-LD в DOM
+        # появляется не мгновенно: сразу после domcontentloaded его ещё нет, и
+        # обновление цены молча возвращало None (поймано на живых товарах).
+        # Блоков на странице бывает несколько (хлебные крошки и т.д.) — берём
+        # именно Product. Промах бывает и плавающий (Cloudflare отдаёт страницу
+        # не с первого раза), поэтому одна повторная попытка.
+        blocks = await self._load_json_ld(external_id)
+        if not blocks:
+            blocks = await self._load_json_ld(external_id)
+        data = None
+        for raw in blocks or []:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(parsed, dict) and parsed.get("@type") == "Product":
+                data = parsed
+                break
+        if data is None:
             return None
         offers = data.get("offers") or {}
         price = offers.get("price")

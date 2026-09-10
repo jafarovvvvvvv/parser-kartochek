@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import db
+import deals
 import scheduler
 from bot import poll_loop
 
@@ -10,7 +11,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 async def main() -> None:
     db.init_db()
-    await asyncio.gather(poll_loop(), scheduler.loop())
+    await asyncio.gather(poll_loop(), scheduler.loop(), deals.loop())
 
 
 if __name__ == "__main__":
