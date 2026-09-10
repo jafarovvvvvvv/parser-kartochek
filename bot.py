@@ -172,6 +172,19 @@ async def handle_text(chat_id: int, text: str) -> None:
         await tg.send_message(chat_id, verdict)
 
 
+async def _run_manual_scan(chat_id: int) -> None:
+    try:
+        # force=True — показать текущие находки целиком, даже если о них уже
+        # сообщали: это ручная проверка «что там сейчас», а не алерт.
+        found = await deals.scan_once(force=True, chats=[chat_id])
+    except Exception:
+        log.exception("ручной обход уценки упал")
+        await tg.send_message(chat_id, "Не смог посмотреть уценку, попробуй позже.")
+        return
+    if not found:
+        await tg.send_message(chat_id, f"Сейчас нет уценки со скидкой от {DEALS_MIN_DISCOUNT}%.")
+
+
 async def handle_deals(chat_id: int, text: str) -> None:
     arg = text[len("/deals"):].strip().lower()
     if arg == "on":
@@ -189,14 +202,11 @@ async def handle_deals(chat_id: int, text: str) -> None:
         await tg.send_message(chat_id, "Больше не присылаю." if removed else "Ты и так не подписан.")
         return
     if arg == "scan":
-        await tg.send_message(chat_id, "Смотрю уценку Sulpak, это займёт пару минут…")
-        # force=True — показать текущие находки целиком, даже если о них уже
-        # сообщали: это ручная проверка «что там сейчас», а не алерт.
-        found = await deals.scan_once(force=True, chats=[chat_id])
-        if not found:
-            await tg.send_message(
-                chat_id, f"Сейчас нет уценки со скидкой от {DEALS_MIN_DISCOUNT}%."
-            )
+        await tg.send_message(chat_id, "Смотрю уценку Sulpak, это займёт несколько минут…")
+        # Фоном, а не здесь: обход раздела с поиском аналогов идёт минутами, а
+        # апдейты обрабатываются по одному — иначе всё это время бот не отвечает
+        # ни на что другое.
+        asyncio.create_task(_run_manual_scan(chat_id))
         return
 
     subscribed = chat_id in db.list_deals_subscribers()
