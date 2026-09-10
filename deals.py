@@ -36,18 +36,26 @@ PAUSE_BETWEEN_LOOKUPS_SEC = 4
 QUERY_WORDS = 5
 
 
-def short_query(name: str) -> str:
-    without_parens = re.sub(r"\([^)]*\)", " ", name)
+def _unique_words(text: str) -> list[str]:
     words: list[str] = []
     seen: set[str] = set()
-    for word in without_parens.split():
+    for word in text.split():
         key = word.lower().strip(",.;")
         if key and key not in seen:
             seen.add(key)
             words.append(word)
-        if len(words) >= QUERY_WORDS:
-            break
-    return " ".join(words)
+    return words
+
+
+def clean_name(name: str) -> str:
+    """Название без повторов. Sulpak дублирует модель и цвет
+    ("FreeBuds 5i T0014 Isle Blue FreeBuds 5i Isle Blue") — на таком названии
+    ИИ хуже узнаёт товар в чужой выдаче и не собирает группу."""
+    return " ".join(_unique_words(name))
+
+
+def short_query(name: str) -> str:
+    return " ".join(_unique_words(re.sub(r"\([^)]*\)", " ", name))[:QUERY_WORDS])
 
 
 _MODEL_CODE_RE = re.compile(r"[a-z0-9][a-z0-9\-/]{3,}", re.I)
@@ -123,11 +131,12 @@ async def find_cheapest_analog(unit: DiscountedUnit) -> Product | None:
     # без кода модели, и такой товар строгое сравнение пропустит. Поэтому,
     # когда ИИ доступен, добираем совпадения ещё и им.
     if OPENAI_API_KEY:
+        cleaned = clean_name(unit.name)
         reference = Product(
-            shop="sulpak", name=unit.name, price=unit.new_price or unit.price,
+            shop="sulpak", name=cleaned, price=unit.new_price or unit.price,
             currency=unit.currency, url=unit.url, external_id=unit.code,
         )
-        groups = await group_and_filter("", unit.name, "", [reference] + candidates)
+        groups = await group_and_filter("", cleaned, "", [reference] + candidates)
         for group in groups:
             if any(p is reference for p in group.products):
                 matched += [p for p in group.products if p is not reference and p not in matched]
