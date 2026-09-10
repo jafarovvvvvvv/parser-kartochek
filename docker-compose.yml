@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      KARTOCHEK_DB_PATH: /app/data/store.db
