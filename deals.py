@@ -229,7 +229,10 @@ async def scan_once(force: bool = False, chats: list[int] | None = None) -> list
         text = format_deal(unit, analog)
         for chat_id in chats:
             try:
-                await tg.send_message(chat_id, text)
+                # Без разметки: в описании дефектов от Sulpak попадаются * _ [ ],
+                # и как Markdown такое сообщение Telegram не примет. Форматировать
+                # тут нечего, поэтому шлём сразу текстом, а не через отказ и повтор.
+                await tg.send_message(chat_id, text, parse_mode=None)
             except Exception:
                 log.exception("deals: не отправилось в чат %s", chat_id)
         db.mark_deal_notified(unit.document, unit.code, unit.name, unit.price, unit.best_discount)
