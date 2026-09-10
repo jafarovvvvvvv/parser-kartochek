@@ -189,6 +189,20 @@ def format_deal(unit: DiscountedUnit, analog: Product | None) -> str:
     return "\n".join(lines)
 
 
+_MIN_DISCOUNT_KEY = "deals_min_discount"
+MIN_DISCOUNT_LIMITS = (1, 99)
+
+
+def min_discount() -> int:
+    """Порог скидки: заданный командой перевешивает значение из окружения."""
+    saved = db.get_setting(_MIN_DISCOUNT_KEY)
+    return int(saved) if saved and saved.isdigit() else DEALS_MIN_DISCOUNT
+
+
+def set_min_discount(value: int) -> None:
+    db.set_setting(_MIN_DISCOUNT_KEY, str(value))
+
+
 def recipients() -> list[int]:
     chats = db.list_deals_subscribers()
     if not chats and DEALS_CHAT_ID:
@@ -204,11 +218,12 @@ async def scan_once(force: bool = False, chats: list[int] | None = None) -> list
         log.info("deals: некому отправлять находки, обход пропущен")
         return []
 
+    threshold = min_discount()
     units = await SULPAK.scan_discounted()
     log.info("deals: уценённых экземпляров всего %s", len(units))
-    good = [u for u in units if u.best_discount >= DEALS_MIN_DISCOUNT]
+    good = [u for u in units if u.best_discount >= threshold]
     good.sort(key=lambda u: -u.best_discount)
-    log.info("deals: со скидкой >= %s%% — %s", DEALS_MIN_DISCOUNT, len(good))
+    log.info("deals: со скидкой >= %s%% — %s", threshold, len(good))
     if not good:
         return []
 
@@ -236,15 +251,21 @@ async def scan_once(force: bool = False, chats: list[int] | None = None) -> list
                 analogs[unit.code] = None
         analog = analogs[unit.code]
         text = format_deal(unit, analog)
+        delivered = False
         for chat_id in chats:
             try:
                 # Без разметки: в описании дефектов от Sulpak попадаются * _ [ ],
                 # и как Markdown такое сообщение Telegram не примет. Форматировать
                 # тут нечего, поэтому шлём сразу текстом, а не через отказ и повтор.
                 await tg.send_message(chat_id, text, parse_mode=None)
+                delivered = True
             except Exception:
                 log.exception("deals: не отправилось в чат %s", chat_id)
-        db.mark_deal_notified(unit.document, unit.code, unit.name, unit.price, unit.best_discount)
+        # Помечаем показанной только реально доставленную находку: иначе сбой
+        # отправки навсегда прячет товар, о котором никто не узнал.
+        if delivered:
+            db.mark_deal_notified(unit.document, unit.code, unit.name, unit.price,
+                                   unit.best_discount)
     return good
 
 

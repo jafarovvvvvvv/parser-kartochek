@@ -10,6 +10,10 @@ class TelegramError(RuntimeError):
 
 
 async def call(method: str, **params) -> dict:
+    # Параметр со значением None нужно не передавать вовсе, а не слать null:
+    # на {"parse_mode": null} Telegram отвечает 400 "unsupported parse_mode"
+    # (поймано на живой отправке находок уценки).
+    params = {key: value for key, value in params.items() if value is not None}
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{API_URL}/{method}", json=params)
     try:

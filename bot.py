@@ -11,7 +11,6 @@ from adapters.technodom import TechnodomAdapter
 from adapters.wildberries import WildberriesAdapter
 from advice import recommend
 from compare import MAX_GROUPS, format_comparison
-from config import DEALS_MIN_DISCOUNT
 from grouping import group_and_filter
 from models import Product
 from query_planner import plan as plan_query
@@ -55,10 +54,11 @@ HELP_TEXT = (
     "/track N — начать отслеживать цену N-го товара из последнего поиска\n"
     "/list — список отслеживаемых товаров\n"
     "/untrack ID — прекратить отслеживание\n"
-    f"/deals on — присылать уценку Sulpak со скидкой от {DEALS_MIN_DISCOUNT}% "
-    "(с дефектами экземпляра и ценой такого же нового в других магазинах)\n"
+    "/deals on — присылать уценку Sulpak с большой скидкой (с дефектами "
+    "экземпляра и ценой такого же нового в других магазинах)\n"
     "/deals off — перестать\n"
-    "/deals scan — проверить уценку прямо сейчас"
+    "/deals scan — проверить уценку прямо сейчас\n"
+    "/deals 50 — порог скидки, от которого присылать"
 )
 
 
@@ -182,7 +182,11 @@ async def _run_manual_scan(chat_id: int) -> None:
         await tg.send_message(chat_id, "Не смог посмотреть уценку, попробуй позже.")
         return
     if not found:
-        await tg.send_message(chat_id, f"Сейчас нет уценки со скидкой от {DEALS_MIN_DISCOUNT}%.")
+        await tg.send_message(
+            chat_id,
+            f"Сейчас нет уценки со скидкой от {deals.min_discount()}%. "
+            "Можно снизить порог: /deals 50",
+        )
 
 
 async def handle_deals(chat_id: int, text: str) -> None:
@@ -191,16 +195,33 @@ async def handle_deals(chat_id: int, text: str) -> None:
         db.add_deals_subscriber(chat_id)
         await tg.send_message(
             chat_id,
-            f"Буду присылать уценку Sulpak со скидкой от {DEALS_MIN_DISCOUNT}% — "
+            f"Буду присылать уценку Sulpak со скидкой от {deals.min_discount()}% — "
             "с дефектами конкретного экземпляра и ценой такого же нового в других "
             "магазинах. Обход раздела уценки идёт по расписанию; чтобы посмотреть, "
-            "что там есть прямо сейчас — /deals scan.",
+            "что там есть прямо сейчас — /deals scan.\n\n"
+            "Порог меняется командой: /deals 50",
         )
         return
     if arg == "off":
         removed = db.remove_deals_subscriber(chat_id)
         await tg.send_message(chat_id, "Больше не присылаю." if removed else "Ты и так не подписан.")
         return
+
+    threshold_arg = arg.removeprefix("порог").strip().rstrip("%")
+    if threshold_arg.isdigit():
+        low, high = deals.MIN_DISCOUNT_LIMITS
+        value = int(threshold_arg)
+        if not low <= value <= high:
+            await tg.send_message(chat_id, f"Порог должен быть от {low} до {high}%.")
+            return
+        deals.set_min_discount(value)
+        await tg.send_message(
+            chat_id,
+            f"Теперь присылаю уценку со скидкой от {value}%. "
+            "Посмотреть, что под этот порог подходит прямо сейчас — /deals scan.",
+        )
+        return
+
     if arg == "scan":
         await tg.send_message(chat_id, "Смотрю уценку Sulpak, это займёт несколько минут…")
         # Фоном, а не здесь: обход раздела с поиском аналогов идёт минутами, а
@@ -213,8 +234,9 @@ async def handle_deals(chat_id: int, text: str) -> None:
     await tg.send_message(
         chat_id,
         ("Уценка Sulpak: подписка включена." if subscribed else "Уценка Sulpak: подписки нет.")
-        + f"\nПорог скидки — от {DEALS_MIN_DISCOUNT}%."
-        + "\n\n/deals on — включить\n/deals off — выключить\n/deals scan — проверить сейчас",
+        + f"\nПорог скидки — от {deals.min_discount()}%."
+        + "\n\n/deals on — включить\n/deals off — выключить"
+        + "\n/deals scan — проверить сейчас\n/deals 50 — изменить порог скидки",
     )
 
 
