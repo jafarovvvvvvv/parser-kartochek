@@ -310,15 +310,37 @@ def deal_buttons(units: list[DiscountedUnit]) -> dict:
 _MIN_DISCOUNT_KEY = "deals_min_discount"
 MIN_DISCOUNT_LIMITS = (1, 99)
 
+# У DNS и Sulpak разное распределение скидок в разделе уценки: у DNS почти всё
+# укладывается в 20-49%, максимум 59% (проверено вживую по Костанаю), а у
+# Sulpak регулярно бывает 70-85%. Один общий порог на оба магазина означает,
+# что либо DNS никогда ничего не проходит, либо Sulpak заваливает находками —
+# поэтому порог настраивается отдельно на каждый магазин.
+_DEFAULT_SHOP_THRESHOLD = {"dns": 40}
 
-def min_discount() -> int:
-    """Порог скидки: заданный командой перевешивает значение из окружения."""
+
+def _threshold_key(shop: str | None) -> str:
+    return f"{_MIN_DISCOUNT_KEY}:{shop}" if shop else _MIN_DISCOUNT_KEY
+
+
+def min_discount(shop: str | None = None) -> int:
+    """Порог скидки: сначала персональный порог магазина (если задавали),
+    потом общий (если задавали), потом дефолт магазина, потом дефолт из
+    окружения. shop=None — общий порог, используется как дефолт для
+    магазинов без своего override."""
+    if shop:
+        saved = db.get_setting(_threshold_key(shop))
+        if saved and saved.isdigit():
+            return int(saved)
     saved = db.get_setting(_MIN_DISCOUNT_KEY)
-    return int(saved) if saved and saved.isdigit() else DEALS_MIN_DISCOUNT
+    if saved and saved.isdigit():
+        return int(saved)
+    if shop:
+        return _DEFAULT_SHOP_THRESHOLD.get(shop, DEALS_MIN_DISCOUNT)
+    return DEALS_MIN_DISCOUNT
 
 
-def set_min_discount(value: int) -> None:
-    db.set_setting(_MIN_DISCOUNT_KEY, str(value))
+def set_min_discount(value: int, shop: str | None = None) -> None:
+    db.set_setting(_threshold_key(shop), str(value))
 
 
 def recipients() -> list[int]:
@@ -370,12 +392,14 @@ async def scan_once(force: bool = False, chats: list[int] | None = None) -> list
 
 
 async def _scan(force: bool, chats: list[int]) -> list[DiscountedUnit]:
-    threshold = min_discount()
     units = await scan_all_shops()
     log.info("deals: уценённых экземпляров всего %s", len(units))
-    good = [u for u in units if u.best_discount >= threshold]
+    # Порог у каждого магазина свой (см. min_discount) — общий отсекал бы либо
+    # все находки DNS, либо заваливал бы находками Sulpak.
+    good = [u for u in units if u.best_discount >= min_discount(u.shop)]
     good.sort(key=lambda u: -u.best_discount)
-    log.info("deals: со скидкой >= %s%% — %s", threshold, len(good))
+    log.info("deals: прошли свой порог — %s из %s (%s)", len(good), len(units),
+             ", ".join(f"{s}>={min_discount(s)}%" for s in registry.DISCOUNTED))
     if not good:
         return []
 

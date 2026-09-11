@@ -145,13 +145,22 @@ def test_скрыть_и_вернуть_модель(ui):
 
 
 def test_порог_меняется_кнопками_и_не_уходит_за_пределы(ui):
-    deals.set_min_discount(60)
-    _press("set:disc:+5")
-    assert deals.min_discount() == 65
-    _press("set:disc:-5")
-    assert deals.min_discount() == 60
-    _say("/deals 150")
-    assert deals.min_discount() == 60 and "от 1 до 99" in _last(ui, "sendMessage")["text"]
+    deals.set_min_discount(60, shop="sulpak")
+    _press("set:disc:sulpak:+5")
+    assert deals.min_discount("sulpak") == 65
+    _press("set:disc:sulpak:-5")
+    assert deals.min_discount("sulpak") == 60
+    _say("/deals sulpak 150")
+    assert deals.min_discount("sulpak") == 60 and "от 1 до 99" in _last(ui, "sendMessage")["text"]
+
+
+def test_у_магазинов_разные_пороги_по_умолчанию(ui):
+    assert deals.min_discount("dns") == 40
+    assert deals.min_discount("sulpak") == deals.DEALS_MIN_DISCOUNT
+    deals.set_min_discount(45, shop="dns")
+    assert deals.min_discount("dns") == 45
+    assert deals.min_discount("sulpak") == deals.DEALS_MIN_DISCOUNT, \
+        "порог одного магазина не должен задевать другой"
 
 
 def test_подписка_кнопками(ui):
@@ -193,7 +202,7 @@ def test_настройки_показывают_порог(ui):
 def test_в_запросы_к_telegram_не_попадает_none(ui):
     _remember(UNITS)
     deals.set_min_discount(60)
-    for data in ("ph:ЦО111", "mute:ЦО111", "set:disc:+5", "deals:on"):
+    for data in ("ph:ЦО111", "mute:ЦО111", "set:disc:sulpak:+5", "deals:on"):
         _press(data)
     _say("/settings")
     bad = [(m, k) for m, p in ui for k, v in p.items() if v is None]

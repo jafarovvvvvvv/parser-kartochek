@@ -195,10 +195,16 @@ async def show_tracked(chat_id: int) -> None:
 
 
 def settings_text() -> str:
+    # У магазинов разное распределение скидок в разделе уценки (у DNS почти всё
+    # укладывается в 20-49%, у Sulpak регулярно 70-85%) — один общий порог
+    # означает, что либо DNS никогда ничего не проходит, либо Sulpak заваливает
+    # находками, поэтому порог настраивается отдельно на каждый магазин.
+    thresholds = "\n".join(
+        f"  {deals.shop_title(s)}: <b>от {deals.min_discount(s)}%</b>" for s in registry.DISCOUNTED
+    )
     return (
         "<b>Настройки</b>\n\n"
-        f"Порог скидки: <b>от {deals.min_discount()}%</b>\n"
-        f"Магазины с уценкой: {', '.join(deals.shop_title(s) for s in registry.DISCOUNTED)}\n"
+        f"Порог скидки по магазинам:\n{thresholds}\n"
         f"Проверка: каждые {deals.DEALS_SCAN_INTERVAL_MIN // 60} ч, "
         f"не больше {deals.DEALS_MAX_PER_SCAN} находок за раз"
     )
@@ -207,12 +213,17 @@ def settings_text() -> str:
 def settings_buttons(chat_id: int) -> dict:
     subscribed = chat_id in db.list_deals_subscribers()
     muted = len(db.list_muted(chat_id))
-    return tg.keyboard([
-        [("−5%", "set:disc:-5"), ("порог", "noop"), ("+5%", "set:disc:+5")],
-        [("🔕 Отписаться", "deals:off") if subscribed else ("🔔 Подписаться", "deals:on")],
-        [("🔎 Проверить сейчас", "deals:scan")],
-        [(f"🙈 Скрытые модели: {muted}", "muted:list")] if muted else [("🔄 Показать находки заново", "deals:again")],
-    ])
+    rows = [
+        [(f"{deals.shop_title(shop)} −5%", f"set:disc:{shop}:-5"),
+         (f"{deals.min_discount(shop)}%", "noop"),
+         (f"{deals.shop_title(shop)} +5%", f"set:disc:{shop}:+5")]
+        for shop in registry.DISCOUNTED
+    ]
+    rows.append([("🔕 Отписаться", "deals:off") if subscribed else ("🔔 Подписаться", "deals:on")])
+    rows.append([("🔎 Проверить сейчас", "deals:scan")])
+    rows.append([(f"🙈 Скрытые модели: {muted}", "muted:list")] if muted
+                else [("🔄 Показать находки заново", "deals:again")])
+    return tg.keyboard(rows)
 
 
 async def show_settings(chat_id: int) -> None:
@@ -229,7 +240,7 @@ async def _run_manual_scan(chat_id: int, force: bool = False) -> None:
     if not found:
         await tg.send_message(
             chat_id,
-            f"Новых находок со скидкой от {deals.min_discount()}% нет.\n"
+            "Новых находок нет.\n"
             "Снизить порог — /settings, показать уже виденные заново — кнопка «Показать находки заново».",
         )
 
@@ -240,8 +251,8 @@ async def handle_deals(chat_id: int, text: str) -> None:
         db.add_deals_subscriber(chat_id)
         await tg.send_message(
             chat_id,
-            f"Буду присылать уценку со скидкой от {deals.min_discount()}% — с дефектами "
-            "конкретного экземпляра, фото и ценой такого же нового в других магазинах.",
+            "Буду присылать уценку — с дефектами конкретного экземпляра, фото и "
+            "ценой такого же нового в других магазинах. Пороги скидки — /settings.",
             buttons=tg.keyboard([[("🔎 Проверить сейчас", "deals:scan")],
                                  [("⚙️ Настройки", "settings")]]),
         )
@@ -251,6 +262,12 @@ async def handle_deals(chat_id: int, text: str) -> None:
         await tg.send_message(chat_id, "Больше не присылаю." if removed else "Ты и так не подписан.")
         return
 
+    # "/deals dns 40" — порог конкретного магазина; "/deals 50" — общий
+    # порог по умолчанию (действует для магазинов без своего значения).
+    parts = arg.split()
+    if len(parts) == 2 and parts[0] in registry.DISCOUNTED and parts[1].rstrip("%").isdigit():
+        await set_threshold(chat_id, int(parts[1].rstrip("%")), shop=parts[0])
+        return
     threshold_arg = arg.removeprefix("порог").strip().rstrip("%")
     if threshold_arg.isdigit():
         await set_threshold(chat_id, int(threshold_arg))
@@ -266,17 +283,18 @@ async def handle_deals(chat_id: int, text: str) -> None:
     await show_settings(chat_id)
 
 
-async def set_threshold(chat_id: int, value: int) -> str:
+async def set_threshold(chat_id: int, value: int, shop: str | None = None) -> str:
     low, high = deals.MIN_DISCOUNT_LIMITS
     if not low <= value <= high:
         await tg.send_message(chat_id, f"Порог должен быть от {low} до {high}%.")
         return "Порог вне допустимого"
-    deals.set_min_discount(value)
+    deals.set_min_discount(value, shop=shop)
+    label = deals.shop_title(shop) if shop else "по умолчанию"
     await tg.send_message(
         chat_id,
-        f"Порог скидки: <b>от {value}%</b>. Проверить, что под него подходит сейчас — /deals scan",
+        f"Порог {label}: <b>от {value}%</b>. Проверить, что под него подходит сейчас — /deals scan",
     )
-    return f"Порог: от {value}%"
+    return f"{label}: от {value}%"
 
 
 async def handle_callback(query: dict) -> None:
@@ -317,13 +335,13 @@ async def handle_callback(query: dict) -> None:
             notice = "Снова буду показывать"
             await show_muted(chat_id)
         elif action == "set":
-            kind, _, value = argument.partition(":")
+            kind, shop, delta = argument.split(":")
             if kind == "disc":
-                notice = await set_threshold(chat_id, deals.min_discount() + int(value))
+                notice = await set_threshold(chat_id, deals.min_discount(shop) + int(delta), shop=shop)
                 await tg.edit_message_text(chat_id, message_id, settings_text(),
                                            buttons=settings_buttons(chat_id))
         elif action == "noop":
-            notice = f"Сейчас от {deals.min_discount()}%"
+            notice = "Порог скидки для этого магазина"
     except Exception:
         log.exception("не смог обработать нажатие %r", data)
         notice = "Что-то сломалось"
