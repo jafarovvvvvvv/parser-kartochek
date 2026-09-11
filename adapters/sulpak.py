@@ -52,11 +52,39 @@ _UNIT_MORE_RE = re.compile(
     r'<div class="product__cheaper-more-text">\s*(?P<text>[^<]*)',
     re.S,
 )
+# Фото самого экземпляра (царапины/вмятины) лежат на отдельном CDN-хосте,
+# в отличие от стокового фото модели (то — на object.pscloud.io/cms/...).
+# Одна и та же ссылка встречается в разметке по 2 раза (href у <a> и
+# background-image/src рядом) — дедуп на стороне вызывающего кода.
+_UNIT_PHOTO_RE = re.compile(r"https://discounted\.object\.pscloud\.io/[^\s\"'<>)]+")
+
+# Рейтинг и число отзывов — общий блок над отзывами на странице товара.
+# Ниже по странице форма "оставить отзыв" повторяет то же значение рейтинга
+# (дефолт виджета звёзд), но БЕЗ текста с числом отзывов — поэтому матчим
+# только пару "значение + текст" рядом, так дефолт формы не подхватывается.
+_RATING_RE = re.compile(
+    r'overall-rating-value">\s*([\d.]+)</div>\s*'
+    r'<div class="product__reviews-block-overall-rating-text">\s*([^<]+)</div>'
+)
 
 
 def _digits(text: str) -> int | None:
     cleaned = re.sub(r"\D", "", text)
     return int(cleaned) if cleaned else None
+
+
+def _parse_rating(page_html: str) -> tuple[float | None, int | None]:
+    """Рейтинг/отзывы уже есть на скачанной странице товара — лишний запрос
+    не нужен. Возвращает (None, None), если отзывов нет вовсе (блок тогда
+    отсутствует на странице целиком, а не просто пустой)."""
+    m = _RATING_RE.search(page_html)
+    if not m:
+        return None, None
+    try:
+        rating = float(m.group(1))
+    except ValueError:
+        rating = None
+    return rating, _digits(m.group(2))
 
 
 def _clean_defect(text: str) -> str:
@@ -123,7 +151,13 @@ def _parse_discounted_listing(page_html: str) -> list[dict]:
     return items
 
 
-def _parse_cheaper_units(fragment: str, item: dict, new_price: int | None) -> list[DiscountedUnit]:
+def _parse_cheaper_units(
+    fragment: str,
+    item: dict,
+    new_price: int | None,
+    rating: float | None = None,
+    reviews_count: int | None = None,
+) -> list[DiscountedUnit]:
     units = []
     for chunk in _UNIT_SPLIT_RE.split(fragment)[1:]:
         doc_m = _UNIT_DOC_RE.search(chunk)
@@ -141,6 +175,11 @@ def _parse_cheaper_units(fragment: str, item: dict, new_price: int | None) -> li
         name_m = _UNIT_NAME_RE.search(chunk)
         discount_m = _UNIT_DISCOUNT_RE.search(chunk)
         city_m = _UNIT_CITY_RE.search(chunk)
+        # Ссылка на фото попадается в разметке дважды (href у <a> и рядом в
+        # background-image/src одного и того же <img>) — dict.fromkeys убирает
+        # дубли, сохраняя порядок. chunk — уже разметка одного экземпляра,
+        # поэтому чужие фото сюда не попадают.
+        photos = list(dict.fromkeys(_UNIT_PHOTO_RE.findall(chunk)))
         units.append(DiscountedUnit(
             document=html.unescape(doc_m.group(1)).strip(),
             code=item["code"],
@@ -152,6 +191,9 @@ def _parse_cheaper_units(fragment: str, item: dict, new_price: int | None) -> li
             defects=defects,
             address=address,
             city=html.unescape(city_m.group(1)).strip() if city_m else None,
+            photos=photos,
+            rating=rating,
+            reviews_count=reviews_count,
             shop_discount=discount_m.group(1).strip() if discount_m else None,
         ))
     return units
@@ -204,6 +246,7 @@ class SulpakAdapter(ShopAdapter):
         new_price = int(float(full_m.group(1))) if full_m else None
         if new_price == _PLACEHOLDER_PRICE:
             new_price = None
+        rating, reviews_count = _parse_rating(page_html)
 
         body = urlencode({
             "code": item["code"],
@@ -221,7 +264,7 @@ class SulpakAdapter(ShopAdapter):
             data=body,
             cookies=_CITY_COOKIES,
         )
-        return _parse_cheaper_units(fragment, item, new_price)
+        return _parse_cheaper_units(fragment, item, new_price, rating, reviews_count)
 
     async def scan_discounted(self, concurrency: int = 4) -> list[DiscountedUnit]:
         """Полный обход раздела уценки по текущему городу."""

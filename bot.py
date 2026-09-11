@@ -4,13 +4,9 @@ import logging
 import db
 import deals
 import tg
-from adapters.dns import DnsAdapter
-from adapters.kaspi import KaspiAdapter
-from adapters.sulpak import SulpakAdapter
-from adapters.technodom import TechnodomAdapter
-from adapters.wildberries import WildberriesAdapter
+from adapters import registry
 from advice import recommend
-from compare import MAX_GROUPS, format_comparison
+from compare import MAX_GROUPS, format_comparison, track_buttons
 from grouping import group_and_filter
 from models import Product
 from query_planner import plan as plan_query
@@ -20,15 +16,7 @@ from voice import transcribe
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
 
-# Ozon пока не в строю — блокирует капчей на каждом запросе, "не отвечает"
-# в ответе на каждый поиск был чистым шумом без пользы.
-ADAPTERS = [
-    WildberriesAdapter(),
-    KaspiAdapter(),
-    SulpakAdapter(),
-    TechnodomAdapter(),
-    DnsAdapter(),
-]
+ADAPTERS = registry.SEARCH
 
 DISPLAY_LIMIT = 4  # с запасом — одинаковые модели у разных магазинов схлопнёт группировка
 # С запасом тянем больше кандидатов у магазина, чтобы было из чего выбирать
@@ -36,29 +24,36 @@ DISPLAY_LIMIT = 4  # с запасом — одинаковые модели у 
 # из топ-3 магазина просто нечем заменить.
 RAW_LIMIT = 15
 
-# Результаты последнего поиска в чате, для команды /track N. Не переживает
-# перезапуск процесса — это ок для MVP, история покупок хранится в БД.
+# Результаты последнего поиска в чате, для кнопок «отслеживать». Не переживают
+# перезапуск процесса — это ок, кнопка тогда попросит поискать заново.
 _last_search: dict[int, list[Product]] = {}
 
 # Незавершённый диалог уточнения: chat_id -> (накопленный текст, номер раунда).
-# Тоже в памяти — переживать перезапуск не обязательно, просто попросим
-# уточнить заново.
 _pending_clarification: dict[int, tuple[str, int]] = {}
 MAX_CLARIFY_ROUNDS = 2
 
+# Список для меню команд Telegram: команды подсказываются прямо в интерфейсе,
+# и их не нужно помнить или искать в /help.
+COMMANDS = [
+    ("deals", "Уценка: находки со скидкой"),
+    ("settings", "Настройки и порог скидки"),
+    ("list", "Отслеживаемые товары"),
+    ("cancel", "Отменить уточнение"),
+    ("help", "Что умеет бот"),
+]
+
 HELP_TEXT = (
     "Пришли название товара текстом или голосом — сравню цены на Wildberries, "
-    "Kaspi.kz, Sulpak, Технодоме и DNS. Если запрос слишком общий (например "
-    "«хочу подарок»), сначала задам уточняющий вопрос.\n\n"
-    "Команды:\n"
-    "/track N — начать отслеживать цену N-го товара из последнего поиска\n"
-    "/list — список отслеживаемых товаров\n"
-    "/untrack ID — прекратить отслеживание\n"
-    "/deals on — присылать уценку Sulpak с большой скидкой (с дефектами "
-    "экземпляра и ценой такого же нового в других магазинах)\n"
-    "/deals off — перестать\n"
-    "/deals scan — проверить уценку прямо сейчас\n"
-    "/deals 50 — порог скидки, от которого присылать"
+    "Kaspi.kz, Sulpak, Технодоме и DNS. Под карточками будут кнопки 📌, чтобы "
+    "поставить товар на отслеживание цены.\n\n"
+    "<b>Уценка.</b> Бот сам обходит разделы уценённых товаров Sulpak и DNS и "
+    "присылает находки: скидка, дефекты конкретного экземпляра, фото этих "
+    "дефектов и цена такого же нового в других магазинах.\n\n"
+    "<b>Команды</b>\n"
+    "/deals — уценка: подписка, проверить сейчас\n"
+    "/settings — порог скидки и что сейчас настроено\n"
+    "/list — отслеживаемые товары\n"
+    "/cancel — сбросить незаконченное уточнение"
 )
 
 
@@ -81,38 +76,27 @@ async def search_all(search_query: str, relevance_query: str) -> tuple[dict[str,
     return out, errored
 
 
-def _adapter_by_name(shop: str):
-    return next(a for a in ADAPTERS if a.name == shop)
-
-
 async def handle_text(chat_id: int, text: str) -> None:
     text = text.strip()
     if text in ("/start", "/help"):
         await tg.send_message(chat_id, HELP_TEXT)
         return
 
+    if text == "/cancel":
+        had = _pending_clarification.pop(chat_id, None)
+        await tg.send_message(chat_id, "Сбросил." if had else "Нечего отменять.")
+        return
+
     if text.startswith("/track"):
         parts = text.split(maxsplit=1)
         if len(parts) != 2 or not parts[1].strip().isdigit():
-            await tg.send_message(chat_id, "Использование: /track N (N — номер из последнего поиска)")
+            await tg.send_message(chat_id, "Использование: /track N (или нажми 📌 под карточкой)")
             return
-        idx = int(parts[1].strip()) - 1
-        candidates = _last_search.get(chat_id, [])
-        if not (0 <= idx < len(candidates)):
-            await tg.send_message(chat_id, "Нет такого номера в последнем поиске. Сначала выполни поиск.")
-            return
-        p = candidates[idx]
-        db.add_tracked_item(chat_id, p.shop, p.external_id, p.name, p.url, p.currency, p.price)
-        await tg.send_message(chat_id, f"Отслеживаю: {p.name} ({p.price} {p.currency})")
+        await track_by_number(chat_id, int(parts[1].strip()))
         return
 
     if text == "/list":
-        items = db.list_tracked_items_for_chat(chat_id)
-        if not items:
-            await tg.send_message(chat_id, "Пока ничего не отслеживается.")
-            return
-        lines = [f"#{i['id']} {i['name']} — {i['last_price']} {i['currency']}" for i in items]
-        await tg.send_message(chat_id, "\n".join(lines))
+        await show_tracked(chat_id)
         return
 
     if text.startswith("/untrack"):
@@ -128,10 +112,18 @@ async def handle_text(chat_id: int, text: str) -> None:
         await handle_deals(chat_id, text)
         return
 
+    if text.startswith("/settings"):
+        await show_settings(chat_id)
+        return
+
     if text.startswith("/"):
         await tg.send_message(chat_id, "Не знаю такую команду.\n\n" + HELP_TEXT)
         return
 
+    await run_search(chat_id, text)
+
+
+async def run_search(chat_id: int, text: str) -> None:
     pending = _pending_clarification.get(chat_id)
     context, rounds = pending if pending else ("", 0)
     full_text = f"{context}\n{text}" if context else text
@@ -143,10 +135,12 @@ async def handle_text(chat_id: int, text: str) -> None:
 
     if planned["action"] == "clarify":
         _pending_clarification[chat_id] = (full_text, rounds + 1)
-        await tg.send_message(chat_id, planned["question"])
+        await tg.send_message(chat_id, tg.escape(planned["question"])
+                              + "\n\n<i>Не то? /cancel — начать заново.</i>")
         return
     _pending_clarification.pop(chat_id, None)
 
+    await tg.send_chat_action(chat_id)
     search_query = planned["query"]
     category = planned.get("category", "")
     criteria = planned.get("criteria", "")
@@ -165,18 +159,69 @@ async def handle_text(chat_id: int, text: str) -> None:
 
     text_out, numbered = format_comparison(full_text, groups, empty_shops, errored)
     _last_search[chat_id] = numbered
-    await tg.send_message(chat_id, text_out)
+    await tg.send_message(chat_id, text_out, buttons=track_buttons(numbered))
 
     verdict = await recommend(full_text, criteria, groups[:MAX_GROUPS])
     if verdict:
-        await tg.send_message(chat_id, verdict)
+        await tg.send_message(chat_id, tg.escape(verdict))
 
 
-async def _run_manual_scan(chat_id: int) -> None:
+async def track_by_number(chat_id: int, number: int) -> str:
+    candidates = _last_search.get(chat_id, [])
+    idx = number - 1
+    if not (0 <= idx < len(candidates)):
+        message = "Не нашёл этот номер — поищи заново, результаты прошлого поиска уже не в памяти."
+        await tg.send_message(chat_id, message)
+        return message
+    p = candidates[idx]
+    db.add_tracked_item(chat_id, p.shop, p.external_id, p.name, p.url, p.currency, p.price)
+    message = f"Отслеживаю: {p.name} ({p.price} {p.currency}). Сообщу, когда подешевеет."
+    await tg.send_message(chat_id, tg.escape(message))
+    return "Поставил на отслеживание"
+
+
+async def show_tracked(chat_id: int) -> None:
+    items = db.list_tracked_items_for_chat(chat_id)
+    if not items:
+        await tg.send_message(chat_id, "Пока ничего не отслеживается. Найди товар и нажми 📌.")
+        return
+    lines, rows = [], []
+    for i in items:
+        price = f"{i['last_price']:,}".replace(",", " ")
+        lines.append(f'• <a href="{i["url"]}">{tg.escape(i["name"])}</a> — <b>{price} {i["currency"]}</b>')
+        rows.append([(f"❌ {i['name'][:28]}", f"untrack:{i['id']}")])
+    await tg.send_message(chat_id, "<b>Отслеживаю:</b>\n" + "\n".join(lines),
+                          buttons=tg.keyboard(rows))
+
+
+def settings_text() -> str:
+    return (
+        "<b>Настройки</b>\n\n"
+        f"Порог скидки: <b>от {deals.min_discount()}%</b>\n"
+        f"Магазины с уценкой: {', '.join(deals.shop_title(s) for s in registry.DISCOUNTED)}\n"
+        f"Проверка: каждые {deals.DEALS_SCAN_INTERVAL_MIN // 60} ч, "
+        f"не больше {deals.DEALS_MAX_PER_SCAN} находок за раз"
+    )
+
+
+def settings_buttons(chat_id: int) -> dict:
+    subscribed = chat_id in db.list_deals_subscribers()
+    muted = len(db.list_muted(chat_id))
+    return tg.keyboard([
+        [("−5%", "set:disc:-5"), ("порог", "noop"), ("+5%", "set:disc:+5")],
+        [("🔕 Отписаться", "deals:off") if subscribed else ("🔔 Подписаться", "deals:on")],
+        [("🔎 Проверить сейчас", "deals:scan")],
+        [(f"🙈 Скрытые модели: {muted}", "muted:list")] if muted else [("🔄 Показать находки заново", "deals:again")],
+    ])
+
+
+async def show_settings(chat_id: int) -> None:
+    await tg.send_message(chat_id, settings_text(), buttons=settings_buttons(chat_id))
+
+
+async def _run_manual_scan(chat_id: int, force: bool = False) -> None:
     try:
-        # force=True — показать текущие находки целиком, даже если о них уже
-        # сообщали: это ручная проверка «что там сейчас», а не алерт.
-        found = await deals.scan_once(force=True, chats=[chat_id])
+        found = await deals.scan_once(force=force, chats=[chat_id])
     except Exception:
         log.exception("ручной обход уценки упал")
         await tg.send_message(chat_id, "Не смог посмотреть уценку, попробуй позже.")
@@ -184,8 +229,8 @@ async def _run_manual_scan(chat_id: int) -> None:
     if not found:
         await tg.send_message(
             chat_id,
-            f"Сейчас нет уценки со скидкой от {deals.min_discount()}%. "
-            "Можно снизить порог: /deals 50",
+            f"Новых находок со скидкой от {deals.min_discount()}% нет.\n"
+            "Снизить порог — /settings, показать уже виденные заново — кнопка «Показать находки заново».",
         )
 
 
@@ -195,11 +240,10 @@ async def handle_deals(chat_id: int, text: str) -> None:
         db.add_deals_subscriber(chat_id)
         await tg.send_message(
             chat_id,
-            f"Буду присылать уценку Sulpak со скидкой от {deals.min_discount()}% — "
-            "с дефектами конкретного экземпляра и ценой такого же нового в других "
-            "магазинах. Обход раздела уценки идёт по расписанию; чтобы посмотреть, "
-            "что там есть прямо сейчас — /deals scan.\n\n"
-            "Порог меняется командой: /deals 50",
+            f"Буду присылать уценку со скидкой от {deals.min_discount()}% — с дефектами "
+            "конкретного экземпляра, фото и ценой такого же нового в других магазинах.",
+            buttons=tg.keyboard([[("🔎 Проверить сейчас", "deals:scan")],
+                                 [("⚙️ Настройки", "settings")]]),
         )
         return
     if arg == "off":
@@ -209,35 +253,120 @@ async def handle_deals(chat_id: int, text: str) -> None:
 
     threshold_arg = arg.removeprefix("порог").strip().rstrip("%")
     if threshold_arg.isdigit():
-        low, high = deals.MIN_DISCOUNT_LIMITS
-        value = int(threshold_arg)
-        if not low <= value <= high:
-            await tg.send_message(chat_id, f"Порог должен быть от {low} до {high}%.")
-            return
-        deals.set_min_discount(value)
-        await tg.send_message(
-            chat_id,
-            f"Теперь присылаю уценку со скидкой от {value}%. "
-            "Посмотреть, что под этот порог подходит прямо сейчас — /deals scan.",
-        )
+        await set_threshold(chat_id, int(threshold_arg))
         return
 
-    if arg == "scan":
-        await tg.send_message(chat_id, "Смотрю уценку Sulpak, это займёт несколько минут…")
-        # Фоном, а не здесь: обход раздела с поиском аналогов идёт минутами, а
-        # апдейты обрабатываются по одному — иначе всё это время бот не отвечает
-        # ни на что другое.
+    if arg in ("scan", "again"):
+        await tg.send_message(chat_id, "Смотрю уценку, это займёт несколько минут…")
+        if arg == "again":
+            db.forget_deals()
         asyncio.create_task(_run_manual_scan(chat_id))
         return
 
-    subscribed = chat_id in db.list_deals_subscribers()
+    await show_settings(chat_id)
+
+
+async def set_threshold(chat_id: int, value: int) -> str:
+    low, high = deals.MIN_DISCOUNT_LIMITS
+    if not low <= value <= high:
+        await tg.send_message(chat_id, f"Порог должен быть от {low} до {high}%.")
+        return "Порог вне допустимого"
+    deals.set_min_discount(value)
     await tg.send_message(
         chat_id,
-        ("Уценка Sulpak: подписка включена." if subscribed else "Уценка Sulpak: подписки нет.")
-        + f"\nПорог скидки — от {deals.min_discount()}%."
-        + "\n\n/deals on — включить\n/deals off — выключить"
-        + "\n/deals scan — проверить сейчас\n/deals 50 — изменить порог скидки",
+        f"Порог скидки: <b>от {value}%</b>. Проверить, что под него подходит сейчас — /deals scan",
     )
+    return f"Порог: от {value}%"
+
+
+async def handle_callback(query: dict) -> None:
+    data = query.get("data") or ""
+    chat_id = query["message"]["chat"]["id"]
+    message_id = query["message"]["message_id"]
+    action, _, argument = data.partition(":")
+    notice = "Готово"
+
+    try:
+        if action == "track":
+            notice = await track_by_number(chat_id, int(argument))
+        elif action == "untrack":
+            ok = db.deactivate_tracked_item(int(argument), chat_id)
+            notice = "Снял с отслеживания" if ok else "Уже снято"
+            await show_tracked(chat_id)
+        elif action == "ph":
+            notice = await send_deal_photos(chat_id, argument)
+        elif action == "mute":
+            notice = await mute_deal(chat_id, message_id, argument)
+        elif action == "cmp":
+            deal = db.get_deal(argument)
+            if not deal:
+                notice = "Не помню эту находку"
+            else:
+                notice = "Ищу в других магазинах"
+                asyncio.create_task(run_search(chat_id, deals.clean_name(deal["name"])))
+        elif action == "deals":
+            await handle_deals(chat_id, f"/deals {argument}")
+            notice = "Ок"
+        elif action == "settings":
+            await show_settings(chat_id)
+        elif action == "muted":
+            await show_muted(chat_id)
+        elif action == "unmute":
+            shop, _, code = argument.partition(":")
+            db.unmute_model(chat_id, shop, code)
+            notice = "Снова буду показывать"
+            await show_muted(chat_id)
+        elif action == "set":
+            kind, _, value = argument.partition(":")
+            if kind == "disc":
+                notice = await set_threshold(chat_id, deals.min_discount() + int(value))
+                await tg.edit_message_text(chat_id, message_id, settings_text(),
+                                           buttons=settings_buttons(chat_id))
+        elif action == "noop":
+            notice = f"Сейчас от {deals.min_discount()}%"
+    except Exception:
+        log.exception("не смог обработать нажатие %r", data)
+        notice = "Что-то сломалось"
+
+    # Без ответа кнопка у пользователя крутит «часики» до таймаута клиента.
+    await tg.answer_callback(query["id"], notice)
+
+
+async def send_deal_photos(chat_id: int, document: str) -> str:
+    photos = db.deal_photos(document)
+    if not photos:
+        return "Фото не сохранились"
+    try:
+        await tg.send_photo_group(chat_id, photos[:10])
+    except Exception:
+        log.exception("не смог отправить фото находки %s", document)
+        # Telegram скачивает картинку сам и иногда не может — тогда пусть у
+        # пользователя останутся хотя бы ссылки, это лучше пустого отказа.
+        await tg.send_message(chat_id, "Фото не загрузились, вот ссылки:\n" + "\n".join(photos[:5]),
+                              disable_preview=False)
+        return "Отправил ссылками"
+    return f"Фото: {len(photos[:10])}"
+
+
+async def mute_deal(chat_id: int, message_id: int, document: str) -> str:
+    deal = db.get_deal(document)
+    if not deal:
+        return "Не помню эту находку"
+    db.mute_model(chat_id, deal["shop"], deal["code"], deal["name"])
+    await tg.edit_message_buttons(chat_id, message_id, tg.keyboard(
+        [[("🔔 Вернуть модель", f"unmute:{deal['shop']}:{deal['code']}")]]
+    ))
+    return "Больше не покажу эту модель"
+
+
+async def show_muted(chat_id: int) -> None:
+    rows = db.list_muted(chat_id)
+    if not rows:
+        await tg.send_message(chat_id, "Скрытых моделей нет.")
+        return
+    buttons = [[(f"🔔 {r['name'][:30]}", f"unmute:{r['shop']}:{r['code']}")] for r in rows[:10]]
+    await tg.send_message(chat_id, "<b>Скрытые модели</b>\nНажми, чтобы снова показывать:",
+                          buttons=tg.keyboard(buttons))
 
 
 async def handle_voice(chat_id: int, file_id: str) -> None:
@@ -245,12 +374,13 @@ async def handle_voice(chat_id: int, file_id: str) -> None:
         text = await transcribe(file_id)
     except Exception as exc:
         log.exception("не смог распознать голосовое от %s", chat_id)
-        await tg.send_message(chat_id, f"⚠️ не смог распознать голосовое: {exc}")
+        await tg.send_message(chat_id, f"⚠️ не смог распознать голосовое: {tg.escape(str(exc))}")
         return
     if not text:
         await tg.send_message(chat_id, "🤷 пустая расшифровка, скажи ещё раз")
         return
-    await tg.send_message(chat_id, f"🎙 понял: {text}")
+    await tg.send_message(chat_id, f"🎙 понял: <b>{tg.escape(text)}</b>\n"
+                                   "<i>Если не то — пришли текстом.</i>")
     await handle_text(chat_id, text)
 
 
@@ -258,7 +388,7 @@ async def _enrich_specs(products: list[Product]) -> None:
     """Подтягивает полную таблицу характеристик со страницы товара там, где
     это возможно (сейчас — только Kaspi), чтобы ИИ сравнивал не только
     по названию."""
-    kaspi = _adapter_by_name("kaspi")
+    kaspi = registry.by_name("kaspi")
     kaspi_products = [p for p in products if p.shop == "kaspi" and p.external_id]
 
     async def fill(p: Product) -> None:
@@ -274,6 +404,12 @@ async def _enrich_specs(products: list[Product]) -> None:
 async def poll_loop() -> None:
     offset = int(db.get_setting("tg_offset", "0"))
     log.info("bot started, offset=%s", offset)
+    try:
+        # Меню команд регистрируем здесь, а не в main(): точка входа проекта
+        # (main.py) зовёт именно poll_loop, а не bot.main().
+        await tg.set_my_commands(COMMANDS)
+    except Exception:
+        log.exception("не смог зарегистрировать меню команд")
     while True:
         try:
             updates = await tg.get_updates(offset=offset or None)
@@ -289,20 +425,32 @@ async def poll_loop() -> None:
             # процесс перезапустят (например, /deploy) в этот момент, Telegram
             # пришлёт то же сообщение повторно — лучше потерять один апдейт
             # при падении, чем дублировать ответ пользователю при каждом рестарте.
-            db.set_setting("tg_offset", str(offset))
-            message = update.get("message")
-            if not message:
-                continue
-            chat_id = message["chat"]["id"]
-            voice = message.get("voice") or message.get("audio")
             try:
+                db.set_setting("tg_offset", str(offset))
+            except Exception:
+                log.exception("не смог сохранить офсет, продолжаю")
+
+            try:
+                if "callback_query" in update:
+                    await handle_callback(update["callback_query"])
+                    continue
+                message = update.get("message")
+                if not message:
+                    continue
+                chat_id = message["chat"]["id"]
+                voice = message.get("voice") or message.get("audio")
                 if voice:
                     await handle_voice(chat_id, voice["file_id"])
                 elif "text" in message:
                     await handle_text(chat_id, message["text"])
             except Exception:
-                log.exception("failed to handle message from %s", chat_id)
-                await tg.send_message(chat_id, "Что-то сломалось, попробуй ещё раз.")
+                log.exception("failed to handle update %s", update.get("update_id"))
+                try:
+                    await tg.send_message(update.get("message", {}).get("chat", {}).get("id")
+                                          or update["callback_query"]["message"]["chat"]["id"],
+                                          "Что-то сломалось, попробуй ещё раз.")
+                except Exception:
+                    log.exception("не смог сообщить об ошибке пользователю")
 
 
 async def main() -> None:

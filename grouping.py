@@ -2,18 +2,14 @@
 относится к искомой категории (наушники среди планшетов), и схлопывает
 одинаковые модели из разных магазинов в группы — всё сравнение цен потом
 идёт внутри группы, а не по всей плоской выдаче."""
-import json
 import logging
 import re
 
-import httpx
-
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from ai import ask_json
+from config import OPENAI_API_KEY
 from models import Product, ProductGroup
 
 log = logging.getLogger(__name__)
-
-API_URL = "https://api.openai.com/v1/chat/completions"
 
 _SYSTEM_PROMPT = (
     "Тебе дают категорию товара, который ищет пользователь, и пронумерованный "
@@ -93,33 +89,10 @@ async def group_and_filter(category: str, query: str, criteria: str, products: l
         user_prompt += f"Важные для пользователя критерии: {criteria}\n"
     user_prompt += f"\nНайденные товары:\n{listing}"
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                API_URL,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json={
-                    "model": OPENAI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_completion_tokens": 600,
-                    # luna — reasoning-модель: без этого она тратит весь лимит
-                    # токенов на скрытые размышления и отдаёт пустой ответ
-                    # (та же проблема, что и в ai_specs, проверено вживую).
-                    "reasoning_effort": "none",
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        parsed = json.loads(data["choices"][0]["message"]["content"])
-        raw_groups = parsed.get("groups")
-        if not isinstance(raw_groups, list):
-            raise ValueError("ответ ИИ без поля groups")
-    except Exception:
-        log.exception("grouping: не удалось сгруппировать через ИИ, показываю без группировки")
+    parsed = await ask_json(_SYSTEM_PROMPT, user_prompt, max_tokens=600, timeout=20)
+    raw_groups = parsed.get("groups") if parsed else None
+    if not isinstance(raw_groups, list):
+        log.warning("grouping: не удалось сгруппировать через ИИ, показываю без группировки")
         return _fallback(products)
 
     return _merge_same_model(_build_groups(raw_groups, products))

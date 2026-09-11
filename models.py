@@ -24,11 +24,12 @@ class DiscountedUnit:
     именно физический экземпляр — у одной модели их бывает несколько, у каждого
     свой документ уценки, своя цена и свои дефекты."""
 
-    document: str        # "ЦО2313010415" — id экземпляра, он же ключ дедупа алертов
-    code: str            # код модели в Sulpak (data-code)
+    document: str        # id экземпляра ("ЦО2313010415" у Sulpak), он же ключ дедупа
+    code: str            # код модели в магазине
     name: str
     price: int           # цена этого уценённого экземпляра
     url: str
+    shop: str = "sulpak"
     currency: str = "KZT"
     old_price: int | None = None   # зачёркнутая цена на карточке листинга
     new_price: int | None = None   # цена нового такого же (data-full-price)
@@ -36,7 +37,12 @@ class DiscountedUnit:
     address: str | None = None     # адрес магазина, где лежит экземпляр
     city: str | None = None
     image: str | None = None
-    shop_discount: str | None = None  # "-50%" — как это считает сам Sulpak
+    # Фото именно этого экземпляра — царапины и вмятины, а не стоковая картинка
+    # модели. По ним видно, стоит ли ехать смотреть.
+    photos: list[str] = field(default_factory=list)
+    rating: float | None = None
+    reviews_count: int | None = None
+    shop_discount: str | None = None  # "-50%" — как это считает сам магазин
 
     def _pct(self, base: int | None) -> int | None:
         if not base or base <= 0 or self.price <= 0 or self.price >= base:

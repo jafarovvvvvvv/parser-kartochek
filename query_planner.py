@@ -1,16 +1,12 @@
 """Превращает произвольный запрос пользователя в короткий поисковый запрос,
 понятный поиску магазинов, плюс критерии для последующего ИИ-сравнения.
 Если категория товара вообще не ясна — просит уточнить, вместо поиска."""
-import json
 import logging
 
-import httpx
-
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from ai import ask_json
+from config import OPENAI_API_KEY
 
 log = logging.getLogger(__name__)
-
-API_URL = "https://api.openai.com/v1/chat/completions"
 
 _SYSTEM_PROMPT = (
     "Ты помогаешь превратить запрос пользователя в интернет-магазины Казахстана "
@@ -38,34 +34,16 @@ async def plan(user_text: str, history: str = "") -> dict:
         return fallback
 
     prompt = user_text if not history else f"{history}\nОтвет пользователя: {user_text}"
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                API_URL,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json={
-                    "model": OPENAI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_completion_tokens": 300,
-                    "reasoning_effort": "none",
-                    "response_format": {"type": "json_object"},
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        parsed = json.loads(data["choices"][0]["message"]["content"])
-        if parsed.get("action") == "search" and parsed.get("query"):
-            return {
-                "action": "search",
-                "query": parsed["query"],
-                "category": parsed.get("category", ""),
-                "criteria": parsed.get("criteria", ""),
-            }
-        if parsed.get("action") == "clarify" and parsed.get("question"):
-            return {"action": "clarify", "question": parsed["question"]}
-    except Exception:
-        log.exception("query_planner: не удалось спланировать запрос, ищем как есть")
+    parsed = await ask_json(_SYSTEM_PROMPT, prompt, max_tokens=300, timeout=20)
+    if parsed is None:
+        log.warning("query_planner: не удалось спланировать запрос, ищем как есть")
+    elif parsed.get("action") == "search" and parsed.get("query"):
+        return {
+            "action": "search",
+            "query": parsed["query"],
+            "category": parsed.get("category", ""),
+            "criteria": parsed.get("criteria", ""),
+        }
+    elif parsed.get("action") == "clarify" and parsed.get("question"):
+        return {"action": "clarify", "question": parsed["question"]}
     return fallback

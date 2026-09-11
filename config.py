@@ -20,6 +20,11 @@ SULPAK_LANGUAGE_ID = int(os.environ.get("SULPAK_LANGUAGE_ID", "3"))  # 3 = ru
 DEALS_MIN_DISCOUNT = int(os.environ.get("KARTOCHEK_DEALS_MIN_DISCOUNT", "70"))
 DEALS_SCAN_INTERVAL_MIN = int(os.environ.get("KARTOCHEK_DEALS_SCAN_INTERVAL_MIN", "180"))
 DEALS_CHAT_ID = os.environ.get("KARTOCHEK_DEALS_CHAT_ID", "")
+# Сколько находок присылать за один обход. Остальные — свёрткой одной строкой:
+# десяток сообщений подряд каждые 3 часа читать невозможно.
+DEALS_MAX_PER_SCAN = int(os.environ.get("KARTOCHEK_DEALS_MAX_PER_SCAN", "5"))
+# DNS-город задаётся кукой city_path (у Sulpak — city_id), значения независимы.
+DNS_CITY_PATH = os.environ.get("DNS_CITY_PATH", "kostanay")
 
 HTTP_TIMEOUT = float(os.environ.get("KARTOCHEK_HTTP_TIMEOUT", "10"))
 HTTP_RETRIES = int(os.environ.get("KARTOCHEK_HTTP_RETRIES", "2"))

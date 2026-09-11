@@ -6,14 +6,11 @@
 дешёвым" по вперемешку разным товарам."""
 import logging
 
-import httpx
-
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from ai import ask_text
+from config import OPENAI_API_KEY
 from models import ProductGroup
 
 log = logging.getLogger(__name__)
-
-API_URL = "https://api.openai.com/v1/chat/completions"
 
 _SYSTEM_PROMPT = (
     "Тебе дают запрос и критерии пользователя, и уже готовые карточки моделей "
@@ -55,27 +52,5 @@ async def recommend(query: str, criteria: str, groups: list[ProductGroup]) -> st
         user_prompt += f"Важные для пользователя критерии: {criteria}\n"
     user_prompt += f"\nНайденные модели:\n{listing}"
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                API_URL,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                json={
-                    "model": OPENAI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_completion_tokens": 300,
-                    # luna — reasoning-модель: без этого тратит весь лимит токенов
-                    # на скрытые размышления и отдаёт пустой ответ (см. grouping.py).
-                    "reasoning_effort": "none",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        return content or None
-    except Exception:
-        log.exception("advice: не удалось получить рекомендацию через ИИ")
-        return None
+    text = await ask_text(_SYSTEM_PROMPT, user_prompt, max_tokens=300, timeout=20)
+    return text or None
